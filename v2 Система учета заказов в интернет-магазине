@@ -1,0 +1,125 @@
+import sqlite3
+import random
+
+class ShopDatabase:
+    """Класс Data Access Object (DAO) для управления базой данных SQLite."""
+    def __init__(self, db_name="shop_upgraded.db"):
+        self.db_name = db_name
+        self._init_db()
+
+    def _init_db(self):
+        """Безопасная инициализация таблиц через менеджер контекста 'with'."""
+        with sqlite3.connect(self.db_name) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day INTEGER,
+                    items_count INTEGER,
+                    total_price REAL,
+                    processing_time REAL
+                )
+            ''')
+            conn.execute('DELETE FROM orders')  # Очистка перед новым экспериментом
+            conn.commit()
+
+    def save_orders_batch(self, data):
+        """Пакетная вставка данных (Bulk Insert) для оптимизации скорости."""
+        with sqlite3.connect(self.db_name) as conn:
+            conn.executemany('''
+                INSERT INTO orders (day, items_count, total_price, processing_time) 
+                VALUES (?, ?, ?, ?)
+            ''', data)
+            conn.commit()
+        print(f"[БД] Успешно залогировано записей в SQLite: {len(data)}")
+
+    def fetch_aggregated_metrics(self):
+        """Агрегация данных средствами SQL (расчет KPI по дням)."""
+        query = '''
+            SELECT day, 
+                   COUNT(id) as total_orders, 
+                   SUM(total_price) as daily_revenue, 
+                   AVG(processing_time) as avg_time
+            FROM orders 
+            GROUP BY day 
+            ORDER BY day
+        '''
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query)
+            return cursor.fetchall()
+
+
+class OrderFlowSimulator:
+    """Класс бизнес-логики: вычислительный эксперимент и нагрузочное тестирование."""
+    def __init__(self, days=30, target_load=50):
+        self.days = days
+        self.target_load = target_load
+
+    def run_simulation(self):
+        print(f"[Эксперимент] Моделирование {self.days} дней работы интернет-магазина...")
+        simulated_orders = []
+
+        for day in range(1, self.days + 1):
+            # Флуктуация заказов вокруг целевой нагрузки
+            daily_count = random.randint(self.target_load - 15, self.target_load + 15)
+            daily_count = max(0, daily_count)
+
+            for _ in range(daily_count):
+                items = random.randint(1, 8)
+                # Расчет стоимости с учетом случайного чека за товар
+                price = round(items * random.uniform(400, 2000), 2)
+                # Время сборки на складе: базовая скорость + случайная задержка
+                proc_time = round(items * 1.1 + random.triangular(0.5, 5.0, 1.5), 2)
+                
+                simulated_orders.append((day, items, price, proc_time))
+
+        return simulated_orders
+
+
+class MarkdownReportGenerator:
+    """Класс для генерации финальной аналитики и красивого отчета для GitHub."""
+    @staticmethod
+    def generate(metrics, filename="report.md"):
+        # Расчет общих итогов эксперимента
+        total_orders = sum(row[1] for row in metrics)
+        total_revenue = sum(row[2] for row in metrics)
+        avg_warehouse_time = sum(row[3] for row in metrics) / len(metrics)
+
+        # Консольный вывод
+        print("\n--- Эксперимент успешно завершен ---")
+        print(f"Общая выручка: {total_revenue:.2f} руб. | Заказов: {total_orders}")
+
+        # Сборка файла Markdown для рендеринга на GitHub
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("# 📊 Результаты вычислительного эксперимента\n\n")
+            f.write("### 📈 Ключевые показатели эффективности (KPI)\n")
+            f.write(f"* **Общая выручка магазина:** {total_revenue:,.2f} руб.\n")
+            f.write(f"* **Всего обработано заказов:** {total_orders} шт.\n")
+            f.write(f"* **Среднее время сборки на складе:** {avg_warehouse_time:.2f} мин.\n\n")
+            
+            f.write("### 📅 Детализация нагрузки по дням\n")
+            f.write("| День | Количество заказов | Выручка за день (руб.) | Ср. время сборки (мин) |\n")
+            f.write("| :---: | :---: | :---: | :---: |\n")
+            
+            for row in metrics:
+                day, count, revenue, s_time = row
+                f.write(f"| {day} | {count} | {revenue:,.2f} | {s_time:.2f} |\n")
+                
+        print(f"[Репорт] Файл '{filename}' успешно сгенерирован для вашего GitHub!")
+
+
+# Главный оркестратор системы
+if __name__ == "__main__":
+    # Инициализация компонентов архитектуры
+    db = ShopDatabase()
+    simulator = OrderFlowSimulator(days=30, target_load=55)
+    
+    # Слой вычислений
+    raw_data = simulator.run_simulation()
+    
+    # Слой работы с данными
+    db.save_orders_batch(raw_data)
+    
+    # Слой аналитики и генерации отчетов
+    daily_metrics = db.fetch_aggregated_metrics()
+    MarkdownReportGenerator.generate(daily_metrics)
