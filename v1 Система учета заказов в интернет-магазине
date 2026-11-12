@@ -1,0 +1,249 @@
+import sqlite3
+import random
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+DB_NAME = "shop_experiment.db"
+
+# Цветовая палитра (Темная тема)
+BG_MAIN = "#1e1e2e"       # Основной фон окна
+BG_PANEL = "#2b2b3c"      # Фон панелей и карточек
+BG_ACCENT = "#3b8ed0"     # Синий акцент (кнопка, шапка таблицы)
+BG_ACCENT_HOVER = "#36719f"
+TEXT_MAIN = "#ffffff"     # Основной белый текст
+TEXT_MUTED = "#a6adc8"    # Серый текст для подписей
+
+
+class ShopOrderSystemApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Система учета заказов интернет-магазина")
+        self.geometry("1000x650")
+        self.resizable(False, False)
+        self.configure(bg=BG_MAIN)
+
+        self.init_db()
+
+        # --- ВЕРХНЯЯ ПАНЕЛЬ ---
+        header_frame = tk.Frame(self, bg=BG_PANEL, bd=0)
+        header_frame.pack(fill="x", padx=20, pady=(20, 10))
+
+        title_label = tk.Label(
+            header_frame,
+            text="📦 Система учета и моделирования заказов",
+            font=("Segoe UI", 18, "bold"),
+            bg=BG_PANEL,
+            fg=TEXT_MAIN
+        )
+        title_label.pack(pady=(15, 10))
+
+        # Панель ввода параметров
+        controls_frame = tk.Frame(header_frame, bg=BG_PANEL)
+        controls_frame.pack(pady=(0, 18))
+
+        tk.Label(
+            controls_frame, text="Дней симуляции:", font=("Segoe UI", 11),
+            bg=BG_PANEL, fg=TEXT_MAIN
+        ).grid(row=0, column=0, padx=8)
+
+        self.days_entry = tk.Entry(
+            controls_frame, width=10, font=("Segoe UI", 11),
+            bg="#181825", fg=TEXT_MAIN, insertbackground="white", relief="flat", justify="center"
+        )
+        self.days_entry.insert(0, "30")
+        self.days_entry.grid(row=0, column=1, padx=5, ipady=4)
+
+        tk.Label(
+            controls_frame, text="Заказов в день (в среднем):", font=("Segoe UI", 11),
+            bg=BG_PANEL, fg=TEXT_MAIN
+        ).grid(row=0, column=2, padx=(15, 8))
+
+        self.orders_entry = tk.Entry(
+            controls_frame, width=10, font=("Segoe UI", 11),
+            bg="#181825", fg=TEXT_MAIN, insertbackground="white", relief="flat", justify="center"
+        )
+        self.orders_entry.insert(0, "40")
+        self.orders_entry.grid(row=0, column=3, padx=5, ipady=4)
+
+        self.run_btn = tk.Button(
+            controls_frame,
+            text="▶ Запустить моделирование",
+            font=("Segoe UI", 11, "bold"),
+            bg=BG_ACCENT,
+            fg="white",
+            activebackground=BG_ACCENT_HOVER,
+            activeforeground="white",
+            relief="flat",
+            cursor="hand2",
+            padx=15,
+            pady=5,
+            command=self.start_process
+        )
+        self.run_btn.grid(row=0, column=4, padx=(20, 5))
+
+        # --- ПАНЕЛЬ КАРТОЧЕК С АНАЛИТИКОЙ ---
+        stats_frame = tk.Frame(self, bg=BG_MAIN)
+        stats_frame.pack(fill="x", padx=15, pady=10)
+
+        for i in range(4):
+            stats_frame.grid_columnconfigure(i, weight=1)
+
+        self.card_orders = self.create_stat_card(stats_frame, 0, "Всего заказов", "0 шт.")
+        self.card_revenue = self.create_stat_card(stats_frame, 1, "Общая выручка", "0.00 ₽")
+        self.card_avg_check = self.create_stat_card(stats_frame, 2, "Средний чек", "0.00 ₽")
+        self.card_time = self.create_stat_card(stats_frame, 3, "Сборка (ср / макс)", "0 / 0 мин.")
+
+        # --- ТАБЛИЦА ЗАКАЗОВ ИЗ БАЗЫ ДАННЫХ ---
+        table_frame = tk.Frame(self, bg=BG_PANEL)
+        table_frame.pack(fill="both", expand=True, padx=20, pady=(10, 20))
+
+        table_label = tk.Label(
+            table_frame,
+            text="Журнал заказов из базы данных (последние 100 записей)",
+            font=("Segoe UI", 12, "bold"),
+            bg=BG_PANEL,
+            fg=TEXT_MAIN
+        )
+        table_label.pack(pady=(12, 8), anchor="w", padx=15)
+
+        # Настройка стилей таблицы
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure(
+            "Treeview",
+            background="#181825",
+            foreground=TEXT_MAIN,
+            rowheight=28,
+            fieldbackground="#181825",
+            borderwidth=0,
+            font=("Segoe UI", 10)
+        )
+        style.map('Treeview', background=[('selected', BG_ACCENT)])
+        style.configure(
+            "Treeview.Heading",
+            background=BG_ACCENT,
+            foreground="white",
+            relief="flat",
+            font=("Segoe UI", 10, "bold"),
+            padding=5
+        )
+        style.map("Treeview.Heading", background=[('active', BG_ACCENT_HOVER)])
+
+        columns = ("id", "day", "items", "price", "time")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=12)
+
+        self.tree.heading("id", text="ID Заказа")
+        self.tree.heading("day", text="День")
+        self.tree.heading("items", text="Кол-во товаров (шт.)")
+        self.tree.heading("price", text="Сумма заказа (₽)")
+        self.tree.heading("time", text="Время сборки (мин.)")
+
+        for col in columns:
+            self.tree.column(col, anchor="center", width=180)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.pack(side="left", fill="both", expand=True, padx=(15, 0), pady=(0, 15))
+        scrollbar.pack(side="right", fill="y", padx=(0, 15), pady=(0, 15))
+
+    def create_stat_card(self, parent, col, title, default_val):
+        """Создает карточку показателя."""
+        card = tk.Frame(parent, bg=BG_PANEL, height=95)
+        card.grid(row=0, column=col, padx=5, sticky="nsew")
+        card.pack_propagate(False)
+
+        title_lbl = tk.Label(card, text=title, font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MUTED)
+        title_lbl.pack(pady=(15, 4))
+
+        val_lbl = tk.Label(card, text=default_val, font=("Segoe UI", 15, "bold"), bg=BG_PANEL, fg=TEXT_MAIN)
+        val_lbl.pack(pady=(0, 10))
+        return val_lbl
+
+    # --- ЛОГИКА РАБОТЫ С БД И СИМУЛЯЦИЕЙ ---
+    def init_db(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    day INTEGER,
+                    items_count INTEGER,
+                    total_price REAL,
+                    processing_time REAL
+                )
+            ''')
+            conn.commit()
+
+    def run_shop_simulation(self, days, orders_per_day):
+        all_orders = []
+        for day in range(1, days + 1):
+            daily_count = random.randint(orders_per_day - 10, orders_per_day + 10)
+            if daily_count < 0:
+                daily_count = 0
+
+            for _ in range(daily_count):
+                items = random.randint(1, 10)
+                price = items * random.uniform(500, 2500)
+                proc_time = items * 1.5 + random.expovariate(1.0 / 2.0)
+                all_orders.append((day, items, round(price, 2), round(proc_time, 2)))
+        return all_orders
+
+    def save_orders_to_db(self, data):
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM orders')
+            cursor.executemany('''
+                INSERT INTO orders (day, items_count, total_price, processing_time)
+                VALUES (?, ?, ?, ?)
+            ''', data)
+            conn.commit()
+
+    def start_process(self):
+        try:
+            days = int(self.days_entry.get())
+            orders_per_day = int(self.orders_entry.get())
+            if days <= 0 or orders_per_day < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Ошибка ввода", "Введите корректные положительные целые числа!")
+            return
+
+        simulated_data = self.run_shop_simulation(days, orders_per_day)
+        self.save_orders_to_db(simulated_data)
+        self.update_ui_from_db()
+
+    def update_ui_from_db(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT order_id, day, items_count, total_price, processing_time FROM orders')
+            rows = cursor.fetchall()
+
+        if not rows:
+            return
+
+        prices = [r[3] for r in rows]
+        times = [r[4] for r in rows]
+
+        total_revenue = sum(prices)
+        avg_check = total_revenue / len(prices)
+        max_time = max(times)
+        avg_time = sum(times) / len(times)
+
+        self.card_orders.configure(text=f"{len(rows):,} шт.".replace(",", " "))
+        self.card_revenue.configure(text=f"{total_revenue:,.2f} ₽".replace(",", " "))
+        self.card_avg_check.configure(text=f"{avg_check:,.2f} ₽".replace(",", " "))
+        self.card_time.configure(text=f"{avg_time:.1f} / {max_time:.1f} мин.")
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        for row in rows[-100:]:
+            formatted_row = (row[0], f"День {row[1]}", f"{row[2]} шт.", f"{row[3]:.2f} ₽", f"{row[4]:.2f} мин.")
+            self.tree.insert("", "end", values=formatted_row)
+
+
+if __name__ == "__main__":
+    app = ShopOrderSystemApp()
+    app.mainloop()
