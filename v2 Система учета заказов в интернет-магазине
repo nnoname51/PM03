@@ -1,125 +1,330 @@
 import sqlite3
 import random
+import csv
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 
-class ShopDatabase:
-    """Класс Data Access Object (DAO) для управления базой данных SQLite."""
-    def __init__(self, db_name="shop_upgraded.db"):
-        self.db_name = db_name
-        self._init_db()
+DB_NAME = "shop_experiment_v2.db"
 
-    def _init_db(self):
-        """Безопасная инициализация таблиц через менеджер контекста 'with'."""
-        with sqlite3.connect(self.db_name) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS orders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    day INTEGER,
-                    items_count INTEGER,
-                    total_price REAL,
-                    processing_time REAL
-                )
-            ''')
-            conn.execute('DELETE FROM orders')  # Очистка перед новым экспериментом
-            conn.commit()
+BG_MAIN = "#181825"
+BG_PANEL = "#242436"
+BG_INPUT = "#11111b"
+BG_ACCENT = "#89b4fa"
+BG_GREEN = "#a6e3a1"
+BG_RED = "#f38ba8"
+TEXT_MAIN = "#cdd6f4"
+TEXT_DARK = "#11111b"
+TEXT_MUTED = "#a6adc8"
 
-    def save_orders_batch(self, data):
-        """Пакетная вставка данных (Bulk Insert) для оптимизации скорости."""
-        with sqlite3.connect(self.db_name) as conn:
-            conn.executemany('''
-                INSERT INTO orders (day, items_count, total_price, processing_time) 
-                VALUES (?, ?, ?, ?)
-            ''', data)
-            conn.commit()
-        print(f"[БД] Успешно залогировано записей в SQLite: {len(data)}")
 
-    def fetch_aggregated_metrics(self):
-        """Агрегация данных средствами SQL (расчет KPI по дням)."""
-        query = '''
-            SELECT day, 
-                   COUNT(id) as total_orders, 
-                   SUM(total_price) as daily_revenue, 
-                   AVG(processing_time) as avg_time
-            FROM orders 
-            GROUP BY day 
-            ORDER BY day
-        '''
-        with sqlite3.connect(self.db_name) as conn:
+class ShopOrderSystemV2(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Система учета заказов интернет-магазина — v2.0 Pro")
+        self.geometry("1100x720")
+        self.resizable(False, False)
+        self.configure(bg=BG_MAIN)
+
+        self.init_db()
+        self.setup_styles()
+
+        header = tk.Frame(self, bg=BG_PANEL)
+        header.pack(fill="x", padx=20, pady=(15, 10))
+
+        top_row = tk.Frame(header, bg=BG_PANEL)
+        top_row.pack(fill="x", padx=15, pady=(12, 5))
+
+        tk.Label(
+            top_row, text="Система учета и аналитики заказов v2.0",
+            font=("Segoe UI", 16, "bold"), bg=BG_PANEL, fg=TEXT_MAIN
+        ).pack(side="left")
+
+        tk.Button(
+            top_row, text="Экспорт в CSV (Excel)", font=("Segoe UI", 10, "bold"),
+            bg=BG_GREEN, fg=TEXT_DARK, relief="flat", cursor="hand2", padx=12, pady=4,
+            command=self.export_to_csv
+        ).pack(side="right")
+
+        sim_row = tk.Frame(header, bg=BG_PANEL)
+        sim_row.pack(fill="x", padx=15, pady=(5, 12))
+
+        tk.Label(sim_row, text="Дней:", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MUTED).pack(side="left")
+        self.days_entry = self.create_entry(sim_row, "30", width=6)
+        self.days_entry.pack(side="left", padx=(5, 15))
+
+        tk.Label(sim_row, text="Заказов/день:", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MUTED).pack(side="left")
+        self.orders_entry = self.create_entry(sim_row, "40", width=6)
+        self.orders_entry.pack(side="left", padx=(5, 15))
+
+        tk.Button(
+            sim_row, text="Запустить симуляцию", font=("Segoe UI", 10, "bold"),
+            bg=BG_ACCENT, fg=TEXT_DARK, relief="flat", cursor="hand2", padx=12, pady=3,
+            command=self.start_simulation
+        ).pack(side="left", padx=5)
+
+        tk.Button(
+            sim_row, text="Очистить базу", font=("Segoe UI", 10),
+            bg=BG_RED, fg=TEXT_DARK, relief="flat", cursor="hand2", padx=10, pady=3,
+            command=self.clear_database
+        ).pack(side="right")
+
+        stats_frame = tk.Frame(self, bg=BG_MAIN)
+        stats_frame.pack(fill="x", padx=15, pady=5)
+        for i in range(4):
+            stats_frame.grid_columnconfigure(i, weight=1)
+
+        self.card_orders = self.create_card(stats_frame, 0, "Всего заказов", "0 шт.")
+        self.card_revenue = self.create_card(stats_frame, 1, "Общая выручка", "0.00 руб.")
+        self.card_avg_check = self.create_card(stats_frame, 2, "Средний чек", "0.00 руб.")
+        self.card_time = self.create_card(stats_frame, 3, "Сборка (ср / макс)", "0 / 0 мин.")
+
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=20, pady=(10, 20))
+
+        self.tab_orders = tk.Frame(self.notebook, bg=BG_PANEL)
+        self.tab_chart = tk.Frame(self.notebook, bg=BG_PANEL)
+
+        self.notebook.add(self.tab_orders, text="  Журнал и управление заказами  ")
+        self.notebook.add(self.tab_chart, text="  График выручки по дням  ")
+
+        self.build_orders_tab()
+        self.build_chart_tab()
+
+        self.refresh_all()
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TNotebook", background=BG_MAIN, borderwidth=0)
+        style.configure("TNotebook.Tab", background=BG_PANEL, foreground=TEXT_MUTED, padding=(12, 6), font=("Segoe UI", 10, "bold"))
+        style.map("TNotebook.Tab", background=[("selected", BG_ACCENT)], foreground=[("selected", TEXT_DARK)])
+
+        style.configure("Treeview", background=BG_INPUT, foreground=TEXT_MAIN, rowheight=26, fieldbackground=BG_INPUT, borderwidth=0, font=("Segoe UI", 10))
+        style.map("Treeview", background=[("selected", "#45475a")])
+        style.configure("Treeview.Heading", background="#313244", foreground=TEXT_MAIN, relief="flat", font=("Segoe UI", 10, "bold"))
+
+    def create_entry(self, parent, default_text, width=10):
+        entry = tk.Entry(parent, width=width, font=("Segoe UI", 10), bg=BG_INPUT, fg=TEXT_MAIN, insertbackground="white", relief="flat", justify="center")
+        entry.insert(0, default_text)
+        return entry
+
+    def create_card(self, parent, col, title, default_val):
+        card = tk.Frame(parent, bg=BG_PANEL, height=85)
+        card.grid(row=0, column=col, padx=5, sticky="nsew")
+        card.pack_propagate(False)
+        tk.Label(card, text=title, font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MUTED).pack(pady=(12, 2))
+        lbl = tk.Label(card, text=default_val, font=("Segoe UI", 14, "bold"), bg=BG_PANEL, fg=TEXT_MAIN)
+        lbl.pack()
+        return lbl
+
+    def build_orders_tab(self):
+        control_bar = tk.Frame(self.tab_orders, bg=BG_PANEL)
+        control_bar.pack(fill="x", padx=15, pady=12)
+
+        tk.Label(control_bar, text="Новый заказ -> День:", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MAIN).pack(side="left")
+        self.add_day = self.create_entry(control_bar, "1", width=5)
+        self.add_day.pack(side="left", padx=4)
+
+        tk.Label(control_bar, text="Товаров:", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MAIN).pack(side="left")
+        self.add_items = self.create_entry(control_bar, "3", width=5)
+        self.add_items.pack(side="left", padx=4)
+
+        tk.Label(control_bar, text="Сумма (руб.):", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MAIN).pack(side="left")
+        self.add_price = self.create_entry(control_bar, "4500", width=8)
+        self.add_price.pack(side="left", padx=4)
+
+        tk.Button(
+            control_bar, text="+ Добавить", font=("Segoe UI", 9, "bold"),
+            bg=BG_GREEN, fg=TEXT_DARK, relief="flat", cursor="hand2", padx=10, pady=2,
+            command=self.add_manual_order
+        ).pack(side="left", padx=(6, 15))
+
+        tk.Button(
+            control_bar, text="Удалить выбранный", font=("Segoe UI", 9),
+            bg="#45475a", fg=TEXT_MAIN, relief="flat", cursor="hand2", padx=10, pady=2,
+            command=self.delete_selected_order
+        ).pack(side="left")
+
+        tk.Label(control_bar, text="Фильтр (День):", font=("Segoe UI", 10), bg=BG_PANEL, fg=TEXT_MUTED).pack(side="right", padx=(5, 0))
+        self.filter_var = tk.StringVar(value="Все дни")
+        self.filter_combo = ttk.Combobox(control_bar, textvariable=self.filter_var, values=["Все дни"], width=10, state="readonly")
+        self.filter_combo.pack(side="right", padx=5)
+        self.filter_combo.bind("<<ComboboxSelected>>", lambda e: self.update_table())
+
+        columns = ("id", "day", "items", "price", "time")
+        self.tree = ttk.Treeview(self.tab_orders, columns=columns, show="headings")
+        headers = {"id": "ID", "day": "День", "items": "Товаров (шт.)", "price": "Сумма (руб.)", "time": "Сборка (мин.)"}
+        for col, text in headers.items():
+            self.tree.heading(col, text=text)
+            self.tree.column(col, anchor="center", width=180)
+
+        scrollbar = ttk.Scrollbar(self.tab_orders, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(15, 0), pady=(0, 15))
+        scrollbar.pack(side="right", fill="y", padx=(0, 15), pady=(0, 15))
+    def build_chart_tab(self):
+        tk.Label(
+            self.tab_chart, text="Динамика ежедневной выручки магазина (руб.)",
+            font=("Segoe UI", 12, "bold"), bg=BG_PANEL, fg=TEXT_MAIN
+        ).pack(pady=(12, 5))
+
+        self.canvas = tk.Canvas(self.tab_chart, bg=BG_INPUT, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=20, pady=(5, 20))
+
+    def draw_revenue_chart(self):
+        self.canvas.delete("all")
+        with sqlite3.connect(DB_NAME) as conn:
             cursor = conn.cursor()
-            cursor.execute(query)
-            return cursor.fetchall()
+            cursor.execute("SELECT day, SUM(total_price) FROM orders GROUP BY day ORDER BY day")
+            data = cursor.fetchall()
 
+        if not data:
+            self.canvas.create_text(500, 180, text="Нет данных для построения графика. Запустите симуляцию.", fill=TEXT_MUTED, font=("Segoe UI", 12))
+            return
 
-class OrderFlowSimulator:
-    """Класс бизнес-логики: вычислительный эксперимент и нагрузочное тестирование."""
-    def __init__(self, days=30, target_load=50):
-        self.days = days
-        self.target_load = target_load
+        self.update_idletasks()
+        w = self.canvas.winfo_width() or 1000
+        h = self.canvas.winfo_height() or 350
+        pad_left, pad_bottom, pad_top, pad_right = 80, 40, 30, 30
 
-    def run_simulation(self):
-        print(f"[Эксперимент] Моделирование {self.days} дней работы интернет-магазина...")
-        simulated_orders = []
+        max_rev = max(row[1] for row in data)
+        bar_area_w = w - pad_left - pad_right
+        bar_area_h = h - pad_top - pad_bottom
+        bar_w = max(4, (bar_area_w / len(data)) - 4)
 
-        for day in range(1, self.days + 1):
-            # Флуктуация заказов вокруг целевой нагрузки
-            daily_count = random.randint(self.target_load - 15, self.target_load + 15)
-            daily_count = max(0, daily_count)
+        self.canvas.create_line(pad_left, pad_top, pad_left, h - pad_bottom, fill=TEXT_MUTED)
+        self.canvas.create_line(pad_left, h - pad_bottom, w - pad_right, h - pad_bottom, fill=TEXT_MUTED)
+        self.canvas.create_text(pad_left - 10, pad_top, text=f"{int(max_rev):,} руб.".replace(",", " "), anchor="e", fill=TEXT_MUTED, font=("Segoe UI", 9))
+        self.canvas.create_text(pad_left - 10, h - pad_bottom, text="0 руб.", anchor="e", fill=TEXT_MUTED, font=("Segoe UI", 9))
 
+        for i, (day, rev) in enumerate(data):
+            x0 = pad_left + i * (bar_area_w / len(data)) + 2
+            x1 = x0 + bar_w
+            bar_h = (rev / max_rev) * bar_area_h if max_rev > 0 else 0
+            y0 = (h - pad_bottom) - bar_h
+            y1 = h - pad_bottom
+
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=BG_ACCENT, outline="")
+            if len(data) <= 35 or i % 2 == 0:
+                self.canvas.create_text((x0 + x1) / 2, h - pad_bottom + 14, text=str(day), fill=TEXT_MUTED, font=("Segoe UI", 8))
+
+    def init_db(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS orders (order_id INTEGER PRIMARY KEY AUTOINCREMENT, day INTEGER, items_count INTEGER, total_price REAL, processing_time REAL)")
+
+    def start_simulation(self):
+        try:
+            days = int(self.days_entry.get())
+            orders_per_day = int(self.orders_entry.get())
+            if days <= 0 or orders_per_day < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректные целые числа!")
+            return
+
+        all_orders = []
+        for day in range(1, days + 1):
+            daily_count = max(0, random.randint(orders_per_day - 10, orders_per_day + 10))
             for _ in range(daily_count):
-                items = random.randint(1, 8)
-                # Расчет стоимости с учетом случайного чека за товар
-                price = round(items * random.uniform(400, 2000), 2)
-                # Время сборки на складе: базовая скорость + случайная задержка
-                proc_time = round(items * 1.1 + random.triangular(0.5, 5.0, 1.5), 2)
-                
-                simulated_orders.append((day, items, price, proc_time))
+                items = random.randint(1, 10)
+                price = items * random.uniform(500, 2500)
+                proc_time = items * 1.5 + random.expovariate(1.0 / 2.0)
+                all_orders.append((day, items, round(price, 2), round(proc_time, 2)))
 
-        return simulated_orders
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM orders")
+            conn.executemany("INSERT INTO orders (day, items_count, total_price, processing_time) VALUES (?, ?, ?, ?)", all_orders)
+
+        self.filter_var.set("Все дни")
+        self.refresh_all()
+
+    def add_manual_order(self):
+        try:
+            day = int(self.add_day.get())
+            items = int(self.add_items.get())
+            price = float(self.add_price.get())
+            if day <= 0 or items <= 0 or price <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Ошибка", "Проверьте правильность введенных данных заказа!")
+            return
+
+        proc_time = round(items * 1.5 + 2.0, 2)
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("INSERT INTO orders (day, items_count, total_price, processing_time) VALUES (?, ?, ?, ?)", (day, items, round(price, 2), proc_time))
+        self.refresh_all()
+
+    def delete_selected_order(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Внимание", "Выберите заказ в таблице для удаления.")
+            return
+        order_id = self.tree.item(selected[0])["values"][0]
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM orders WHERE order_id = ?", (order_id,))
+        self.refresh_all()
+
+    def clear_database(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM orders")
+        self.refresh_all()
+
+    def export_to_csv(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            rows = conn.execute("SELECT * FROM orders").fetchall()
+        if not rows:
+            messagebox.showwarning("Пусто", "Нет данных для экспорта!")
+            return
+
+        file_path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV файлы", "*.csv")], initialfile="orders_report.csv")
+        if file_path:
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(["ID Заказа", "День", "Кол-во товаров", "Сумма (руб.)", "Время сборки (мин.)"])
+                writer.writerows(rows)
+            messagebox.showinfo("Готово", "Отчет успешно сохранен!")
+
+    def refresh_all(self):
+        with sqlite3.connect(DB_NAME) as conn:
+            rows = conn.execute("SELECT total_price, processing_time, day FROM orders").fetchall()
+
+        if not rows:
+            self.card_orders.configure(text="0 шт.")
+            self.card_revenue.configure(text="0.00 руб.")
+            self.card_avg_check.configure(text="0.00 руб.")
+            self.card_time.configure(text="0 / 0 мин.")
+            self.filter_combo["values"] = ["Все дни"]
+        else:
+            prices = [r[0] for r in rows]
+            times = [r[1] for r in rows]
+            days_list = sorted(list(set(str(r[2]) for r in rows)), key=int)
+            self.filter_combo["values"] = ["Все дни"] + days_list
+
+            total_rev = sum(prices)
+            self.card_orders.configure(text=f"{len(rows):,} шт.".replace(",", " "))
+            self.card_revenue.configure(text=f"{total_rev:,.2f} руб.".replace(",", " "))
+            self.card_avg_check.configure(text=f"{total_rev / len(prices):,.2f} руб.".replace(",", " "))
+            self.card_time.configure(text=f"{sum(times) / len(times):.1f} / {max(times):.1f} мин.")
+
+        self.update_table()
+        self.draw_revenue_chart()
+
+    def update_table(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        selected_day = self.filter_var.get()
+        with sqlite3.connect(DB_NAME) as conn:
+            if selected_day == "Все дни":
+                rows = conn.execute("SELECT * FROM orders ORDER BY order_id DESC LIMIT 150").fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM orders WHERE day = ? ORDER BY order_id DESC", (int(selected_day),)).fetchall()
+
+        for r in rows:
+            self.tree.insert("", "end", values=(r[0], f"День {r[1]}", f"{r[2]} шт.", f"{r[3]:.2f} руб.", f"{r[4]:.2f} мин."))
 
 
-class MarkdownReportGenerator:
-    """Класс для генерации финальной аналитики и красивого отчета для GitHub."""
-    @staticmethod
-    def generate(metrics, filename="report.md"):
-        # Расчет общих итогов эксперимента
-        total_orders = sum(row[1] for row in metrics)
-        total_revenue = sum(row[2] for row in metrics)
-        avg_warehouse_time = sum(row[3] for row in metrics) / len(metrics)
-
-        # Консольный вывод
-        print("\n--- Эксперимент успешно завершен ---")
-        print(f"Общая выручка: {total_revenue:.2f} руб. | Заказов: {total_orders}")
-
-        # Сборка файла Markdown для рендеринга на GitHub
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write("# 📊 Результаты вычислительного эксперимента\n\n")
-            f.write("### 📈 Ключевые показатели эффективности (KPI)\n")
-            f.write(f"* **Общая выручка магазина:** {total_revenue:,.2f} руб.\n")
-            f.write(f"* **Всего обработано заказов:** {total_orders} шт.\n")
-            f.write(f"* **Среднее время сборки на складе:** {avg_warehouse_time:.2f} мин.\n\n")
-            
-            f.write("### 📅 Детализация нагрузки по дням\n")
-            f.write("| День | Количество заказов | Выручка за день (руб.) | Ср. время сборки (мин) |\n")
-            f.write("| :---: | :---: | :---: | :---: |\n")
-            
-            for row in metrics:
-                day, count, revenue, s_time = row
-                f.write(f"| {day} | {count} | {revenue:,.2f} | {s_time:.2f} |\n")
-                
-        print(f"[Репорт] Файл '{filename}' успешно сгенерирован для вашего GitHub!")
-
-
-# Главный оркестратор системы
 if __name__ == "__main__":
-    # Инициализация компонентов архитектуры
-    db = ShopDatabase()
-    simulator = OrderFlowSimulator(days=30, target_load=55)
-    
-    # Слой вычислений
-    raw_data = simulator.run_simulation()
-    
-    # Слой работы с данными
-    db.save_orders_batch(raw_data)
-    
-    # Слой аналитики и генерации отчетов
-    daily_metrics = db.fetch_aggregated_metrics()
-    MarkdownReportGenerator.generate(daily_metrics)
+    app = ShopOrderSystemV2()
+    app.mainloop()
